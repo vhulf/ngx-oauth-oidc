@@ -79,6 +79,7 @@ export class OAuthService extends AuthConfig {
     protected sessionCheckTimer: any;
     protected silentRefreshSubject: string;
     protected inImplicitFlow = false;
+    private disableNonceCheck = false;
 
     constructor(
         protected ngZone: NgZone,
@@ -623,6 +624,77 @@ export class OAuthService extends AuthConfig {
             );
         });
     }
+    /**
+     * Get token using an intermediate code. Works for the Authorization Code flow.
+     */
+    private getTokenFromCode(code: string): Promise<object> {
+      let params = new HttpParams()
+        .set('grant_type', 'authorization_code')
+        .set('code', code)
+        .set('redirect_uri', this.redirectUri);
+      return this.fetchToken(params);
+    }
+
+    private fetchToken(params: HttpParams): Promise<object> {
+
+      if (!this.validateUrlForHttps(this.tokenEndpoint)) {
+        throw new Error(
+          'tokenEndpoint must use Http. Also check property requireHttps.'
+        );
+      }
+
+      return new Promise((resolve, reject) => {
+        params = params.set('client_id', this.clientId);
+
+              if (this.customQueryParams) {
+                  for (const key of Object.getOwnPropertyNames(this.customQueryParams)) {
+                      params = params.set(key, this.customQueryParams[key]);
+                  }
+              }
+
+              const headers = new HttpHeaders().set(
+                  'Content-Type',
+                  'application/x-www-form-urlencoded'
+              );
+
+        this.http.post<TokenResponse>(this.tokenEndpoint, params, { headers }).subscribe(
+          (tokenResponse) => {
+            this.debug('refresh tokenResponse', tokenResponse);
+            this.storeAccessTokenResponse(tokenResponse.access_token, tokenResponse.refresh_token, tokenResponse.expires_in, tokenResponse.scope);
+
+            
+            if (this.oidc && tokenResponse.idToken) {
+              this.processIdToken(tokenResponse.id_token, tokenResponse.access_token).
+                then(result => {
+                  this.storeIdToken(result);
+
+                  this.eventsSubject.next(new OAuthSuccessEvent('token_received'));
+                  this.eventsSubject.next(new OAuthSuccessEvent('token_refreshed'));
+
+                  resolve(tokenResponse);
+                })
+                .catch(reason => {
+                  this.eventsSubject.next(new OAuthErrorEvent('token_validation_error', reason));
+                  console.error('Error validating tokens');
+                  console.error(reason);
+
+                  reject(reason);
+                });
+            } else {
+              this.eventsSubject.next(new OAuthSuccessEvent('token_received'));
+              this.eventsSubject.next(new OAuthSuccessEvent('token_refreshed'));
+
+              resolve(tokenResponse);
+            }
+          },
+          (err) => {
+            console.error('Error getting token', err);
+            this.eventsSubject.next(new OAuthErrorEvent('token_refresh_error', err));
+            reject(err);
+          }
+        );
+      });
+    }
 
     /**
      * Uses password flow to exchange userName and password for an access_token.
@@ -1092,30 +1164,26 @@ export class OAuthService extends AuthConfig {
             redirectUri = this.redirectUri;
         }
 
-        return this.createAndSaveNonce().then((nonce: any) => {
-            if (state) {
-                state = nonce + this.config.nonceStateSeparator + state;
-            } else {
-                state = nonce;
-            }
+        let nonce = null;
+        if (!this.disableNonceCheck) {
+          let str;
+          let nonce = this.createAndSaveNonce().then((val) => {
+            str = val;
+          });
+          if (state) {
+            state = str + this.config.nonceStateSeparator + state;
+          } else {
+            state = str;
+          }
+        }
 
-            if (!this.requestAccessToken && !this.oidc) {
-                throw new Error(
-                    'Either requestAccessToken or oidc or both must be true'
-                );
-            }
+        if (!this.requestAccessToken && !this.oidc) {
+            throw new Error(
+                'Either requestAccessToken or oidc or both must be true'
+            );
+        }
 
-            if (this.config.responseType) {
-              this.responseType = this.config.responseType;
-            } else {
-              if (this.oidc && this.requestAccessToken) {
-                  this.responseType = 'id_token token';
-              } else if (this.oidc && !this.requestAccessToken) {
-                  this.responseType = 'id_token';
-              } else {
-                  this.responseType = 'token';
-              }
-            }
+        this.responseType = this.getResponseType(this.inImplicitFlow);
 
             const seperationChar = that.loginUrl.indexOf('?') > -1 ? '&' : '?';
 
@@ -1147,8 +1215,8 @@ export class OAuthService extends AuthConfig {
                 url += '&resource=' + encodeURIComponent(that.resource);
             }
 
-            if (that.oidc) {
-                url += '&nonce=' + encodeURIComponent(nonce);
+            if (nonce && this.oidc) {
+              url += '&nonce=' + encodeURIComponent(nonce);
             }
 
             if (noPrompt) {
@@ -1167,9 +1235,9 @@ export class OAuthService extends AuthConfig {
                 }
             }
 
-            return url;
-        });
-    }
+        return Promise.resolve(url);
+
+    };
 
     initImplicitFlowInternal(
         additionalState = '',
@@ -1205,6 +1273,51 @@ export class OAuthService extends AuthConfig {
                 this.inImplicitFlow = false;
             });
     }
+
+    /**
+     * Starts the authorization code flow and redirects to user to
+     * the auth servers login url.
+     */
+      public initAuthorizationCodeFlow(): void {
+        if (this.loginUrl !== '') {
+          this.initAuthorizationCodeFlowInternal();
+        } else {
+          this.events.pipe(filter(e => e.type === 'discovery_document_loaded'))
+            .subscribe(_ => this.initAuthorizationCodeFlowInternal());
+        }
+      }
+
+      private initAuthorizationCodeFlowInternal(): void {
+
+        if (!this.validateUrlForHttps(this.loginUrl)) {
+          throw new Error('loginUrl must use Http. Also check property requireHttps.');
+        }
+
+        this.createLoginUrl('', '', null, false, {}).then(function (url) {
+          location.href = url;
+        })
+          .catch(error => {
+            console.error('Error in initAuthorizationCodeFlow');
+            console.error(error);
+          });
+      };
+
+      private getResponseType(implicit: boolean): string {
+
+        if (implicit) {
+          if (this.oidc && this.requestAccessToken) {
+            return 'id_token token';
+          }
+          else if (this.oidc && !this.requestAccessToken) {
+            return 'id_token';
+          }
+          else {
+            return 'token';
+          }
+        } else {
+          return 'code';
+        }
+      }
 
     /**
      * Starts the implicit flow and redirects to user to
@@ -1263,6 +1376,47 @@ export class OAuthService extends AuthConfig {
             this._storage.setItem('refresh_token', refreshToken);
         }
     }
+    /**
+     * Checks whether there are tokens in the hash fragment
+     * as a result of the implicit flow. These tokens are
+     * parsed, validated and used to sign the user in to the
+     * current client.
+     *
+     * @param options Optinal options.
+     */
+    public tryLogin(options: LoginOptions = null): Promise<boolean> {
+
+        options = options || {};
+
+        if (!this.requestAccessToken && !this.oidc) {
+          return Promise.reject('Either requestAccessToken or oidc or both must be true.');
+        }
+
+        if (window.location.search && (window.location.search.startsWith('?code=') || window.location.search.includes('&code='))) {
+          return this.tryLoginAuthorizationCode();
+        } else {
+          return this.tryLoginImplicit(options);
+        }
+    };
+
+    private tryLoginAuthorizationCode(): Promise<boolean> {
+
+        let parameter = window.location.search.split("?")[1].split("&");
+        let codeParam = parameter.filter(param => param.includes('code='));
+        let code = codeParam.length ? codeParam[0].split('code=')[1] : undefined;
+
+        if (code) {
+          return new Promise((resolve, reject) => {
+            this.getTokenFromCode(code).then(result => {
+              resolve();
+            }).catch(err => {
+              reject(err);
+            });
+          });
+        } else {
+          return Promise.resolve(true);
+        }
+    }
 
     /**
      * Checks whether there are tokens in the hash fragment
@@ -1272,7 +1426,7 @@ export class OAuthService extends AuthConfig {
      *
      * @param options Optional options.
      */
-    public tryLogin(options: LoginOptions = null): Promise<boolean> {
+    public tryLoginImplicit(options: LoginOptions = null): Promise<boolean> {
         options = options || {};
 
         let parts: object;
@@ -1706,19 +1860,34 @@ export class OAuthService extends AuthConfig {
      * redirected to it.
      * @param noRedirectToLogoutUrl
      */
+    public getAuthorizationHeader(): Promise<string> {
+
+         if (this.hasValidAccessToken()) {
+         return Promise.resolve(this.authorizationHeader());
+         }
+
+         let refreshToken = this.getRefreshToken();
+         if (!refreshToken) {
+         this.clearStorage();
+         return Promise.reject("No refresh token available");
+         }
+
+         console.log("Session no longer valid. Try to get new one using refresh token");
+         return this.refreshToken().then(result => {
+         if (this.hasValidAccessToken()) {
+             return Promise.resolve(this.authorizationHeader());
+         }
+
+         return Promise.reject("Unable to refresh token");
+         }).catch(reason => {
+         this.clearStorage();
+         return Promise.reject("Unable to refresh token - " + reason);
+         });
+    }
+
     public logOut(noRedirectToLogoutUrl = false): void {
         const id_token = this.getIdToken();
-        this._storage.removeItem('access_token');
-        this._storage.removeItem('id_token');
-        this._storage.removeItem('refresh_token');
-        this._storage.removeItem('nonce');
-        this._storage.removeItem('expires_at');
-        this._storage.removeItem('id_token_claims_obj');
-        this._storage.removeItem('id_token_expires_at');
-        this._storage.removeItem('id_token_stored_at');
-        this._storage.removeItem('access_token_stored_at');
-        this._storage.removeItem('granted_scopes');
-        this._storage.removeItem('session_state');
+        this.clearStorage();
 
         this.silentRefreshSubject = null;
 
@@ -1778,6 +1947,18 @@ export class OAuthService extends AuthConfig {
             that._storage.setItem('nonce', nonce);
             return nonce;
         });
+    }
+
+    private clearStorage() {
+        this._storage.removeItem('access_token');
+        this._storage.removeItem('id_token');
+        this._storage.removeItem('refresh_token');
+        this._storage.removeItem('nonce');
+        this._storage.removeItem('expires_at');
+        this._storage.removeItem('id_token_claims_obj');
+        this._storage.removeItem('id_token_expires_at');
+        this._storage.removeItem('id_token_stored_at');
+        this._storage.removeItem('access_token_stored_at');
     }
 
     protected createNonce(): Promise<string> {
