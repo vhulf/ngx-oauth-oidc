@@ -663,7 +663,7 @@ export class OAuthService extends AuthConfig {
             this.storeAccessTokenResponse(tokenResponse.access_token, tokenResponse.refresh_token, tokenResponse.expires_in, tokenResponse.scope);
 
 
-            if (this.oidc && tokenResponse.idToken) {
+            if (this.oidc && tokenResponse.id_token) {
               this.processIdToken(tokenResponse.id_token, tokenResponse.access_token).
                 then(result => {
                   this.storeIdToken(result);
