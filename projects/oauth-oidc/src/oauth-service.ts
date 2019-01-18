@@ -662,7 +662,7 @@ export class OAuthService extends AuthConfig {
             this.debug('refresh tokenResponse', tokenResponse);
             this.storeAccessTokenResponse(tokenResponse.access_token, tokenResponse.refresh_token, tokenResponse.expires_in, tokenResponse.scope);
 
-            
+
             if (this.oidc && tokenResponse.idToken) {
               this.processIdToken(tokenResponse.id_token, tokenResponse.access_token).
                 then(result => {
