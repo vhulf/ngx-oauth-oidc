@@ -657,7 +657,7 @@ export class OAuthService extends AuthConfig {
                   'application/x-www-form-urlencoded'
               );
 
-        this.http.post<TokenResponseWithId>(this.tokenEndpoint, params, { headers }).subscribe(
+        this.http.post<TokenResponse>(this.tokenEndpoint, params, { headers }).subscribe(
           (tokenResponse) => {
             this.debug('refresh tokenResponse', tokenResponse);
             this.storeAccessTokenResponse(tokenResponse.access_token, tokenResponse.refresh_token, tokenResponse.expires_in, tokenResponse.scope);

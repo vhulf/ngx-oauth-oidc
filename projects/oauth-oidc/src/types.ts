@@ -110,20 +110,7 @@ export interface TokenResponse {
   refresh_token: string;
   scope: string;
   state?: string;
-}
-
-/**
- * Represents the response from the token endpoint
- * http://openid.net/specs/openid-connect-core-1_0.html#TokenEndpoint
- */
-export interface TokenResponseWithId {
-  access_token: string;
-  token_type: string;
-  id_token: string;
-  expires_in: number;
-  refresh_token: string;
-  scope: string;
-  state?: string;
+  id_token?: string;
 }
 
 /**
